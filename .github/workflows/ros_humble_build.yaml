@@ -1,0 +1,135 @@
+name: Backend(ROS2 Humble)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_ROOT: /opt/flutter
+  FLUTTER_VERSION: '3.29.3'
+  ROS_VERSION: humble
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            container_image: osrf/ros:humble-desktop
+            tarball_arch: x86_64
+            build_os: ubuntu22.04
+            artifact_name: backend-x86_64
+          - runner: ubuntu-24.04-arm
+            container_image: ros:humble-ros-base-jammy
+            tarball_arch: arm64
+            build_os: ubuntu22.04
+            artifact_name: backend-arm64
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.container_image }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            git \
+            curl \
+            ca-certificates \
+            unzip \
+            xz-utils \
+            zip \
+            libglu1-mesa \
+            protobuf-compiler \
+            libprotobuf-dev \
+            libboost-filesystem-dev \
+            libopencv-dev \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libjsoncpp-dev \
+            libssl-dev \
+            zlib1g-dev \
+            uuid-dev \
+            libc-ares-dev \
+            libbrotli-dev \
+            ros-humble-nav2-msgs \
+            ros-humble-desktop \
+            sudo
+
+      - name: Install Flutter
+        run: |
+          set -eo pipefail
+          git clone --depth 1 --branch "${FLUTTER_VERSION}" \
+            https://github.com/flutter/flutter.git "${FLUTTER_ROOT}"
+          "${FLUTTER_ROOT}/bin/flutter" config --no-analytics --enable-web
+          "${FLUTTER_ROOT}/bin/flutter" precache --web
+
+      - name: Run ./build.sh
+        run: |
+          set -eo pipefail
+          export PATH="${FLUTTER_ROOT}/bin:${PATH}"
+          dart pub global activate protoc_plugin
+          export PATH="${PATH}:${HOME}/.pub-cache/bin"
+          set +u
+          source /opt/ros/humble/setup.bash
+          set -u
+          cd "${GITHUB_WORKSPACE}"
+          ./build.sh
+
+      - name: Package release zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TARBALL_ARCH: ${{ matrix.tarball_arch }}
+          ROS_VERSION: ${{ env.ROS_VERSION }}
+          BUILD_OS: ${{ matrix.build_os }}
+        run: |
+          set -euo pipefail
+          INSTALL="${GITHUB_WORKSPACE}/backend/build/install"
+          cd "${INSTALL}/bin"
+          zip -r "${INSTALL}/backend-${TAG_NAME}-${ROS_VERSION}-${TARBALL_ARCH}-${BUILD_OS}.zip" .
+
+      - name: Prepare release metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Upload workflow artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: backend/build/install/backend-${{ github.ref_name }}-${{ env.ROS_VERSION }}-${{ matrix.tarball_arch }}-${{ matrix.build_os }}.zip
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: backend/build/install/backend-${{ github.ref_name }}-${{ env.ROS_VERSION }}-${{ matrix.tarball_arch }}-${{ matrix.build_os }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
